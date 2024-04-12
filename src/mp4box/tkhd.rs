@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 
@@ -117,9 +117,7 @@ impl TkhdBox {
 }
 
 impl Mp4Box for TkhdBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::TkhdBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -145,53 +143,52 @@ impl Mp4Box for TkhdBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for TkhdBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
-        let (version, flags) = read_box_header_ext(reader)?;
+impl BlockReader for TkhdBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
         let (creation_time, modification_time, track_id, _, duration) = if version == 1 {
             (
-                reader.read_u64::<BigEndian>()?,
-                reader.read_u64::<BigEndian>()?,
-                reader.read_u32::<BigEndian>()?,
-                reader.read_u32::<BigEndian>()?,
-                reader.read_u64::<BigEndian>()?,
+                reader.get_u64(),
+                reader.get_u64(),
+                reader.get_u32(),
+                reader.get_u32(),
+                reader.get_u64(),
             )
         } else if version == 0 {
             (
-                reader.read_u32::<BigEndian>()? as u64,
-                reader.read_u32::<BigEndian>()? as u64,
-                reader.read_u32::<BigEndian>()?,
-                reader.read_u32::<BigEndian>()?,
-                reader.read_u32::<BigEndian>()? as u64,
+                reader.get_u32() as u64,
+                reader.get_u32() as u64,
+                reader.get_u32(),
+                reader.get_u32(),
+                reader.get_u32() as u64,
             )
         } else {
             return Err(Error::InvalidData("version must be 0 or 1"));
         };
-        reader.read_u64::<BigEndian>()?; // reserved
-        let layer = reader.read_u16::<BigEndian>()?;
-        let alternate_group = reader.read_u16::<BigEndian>()?;
-        let volume = FixedPointU8::new_raw(reader.read_u16::<BigEndian>()?);
 
-        reader.read_u16::<BigEndian>()?; // reserved
+        reader.get_u64(); // reserved
+
+        let layer = reader.get_u16();
+        let alternate_group = reader.get_u16();
+        let volume = FixedPointU8::new_raw(reader.get_u16());
+
+        reader.get_u16(); // reserved
+
         let matrix = Matrix {
-            a: reader.read_i32::<BigEndian>()?,
-            b: reader.read_i32::<BigEndian>()?,
-            u: reader.read_i32::<BigEndian>()?,
-            c: reader.read_i32::<BigEndian>()?,
-            d: reader.read_i32::<BigEndian>()?,
-            v: reader.read_i32::<BigEndian>()?,
-            x: reader.read_i32::<BigEndian>()?,
-            y: reader.read_i32::<BigEndian>()?,
-            w: reader.read_i32::<BigEndian>()?,
+            a: reader.get_i32(),
+            b: reader.get_i32(),
+            u: reader.get_i32(),
+            c: reader.get_i32(),
+            d: reader.get_i32(),
+            v: reader.get_i32(),
+            x: reader.get_i32(),
+            y: reader.get_i32(),
+            w: reader.get_i32(),
         };
 
-        let width = FixedPointU16::new_raw(reader.read_u32::<BigEndian>()?);
-        let height = FixedPointU16::new_raw(reader.read_u32::<BigEndian>()?);
-
-        skip_bytes_to(reader, start + size)?;
+        let width = FixedPointU16::new_raw(reader.get_u32());
+        let height = FixedPointU16::new_raw(reader.get_u32());
 
         Ok(TkhdBox {
             version,
@@ -208,12 +205,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for TkhdBox {
             height,
         })
     }
+
+    fn size_hint() -> usize {
+        84
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for TkhdBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -261,7 +262,6 @@ impl<W: Write> WriteBox<&mut W> for TkhdBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_tkhd32() {
@@ -283,12 +283,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::TkhdBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::TkhdBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = TkhdBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = TkhdBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 
@@ -312,12 +312,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::TkhdBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::TkhdBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = TkhdBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = TkhdBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

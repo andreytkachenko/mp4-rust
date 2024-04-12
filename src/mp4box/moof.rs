@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 use crate::mp4box::{mfhd::MfhdBox, traf::TrafBox};
@@ -27,9 +27,7 @@ impl MoofBox {
 }
 
 impl Mp4Box for MoofBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::MoofBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -45,58 +43,44 @@ impl Mp4Box for MoofBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for MoofBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
+impl BlockReader for MoofBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
         let mut mfhd = None;
         let mut trafs = Vec::new();
 
-        let mut current = reader.stream_position()?;
-        let end = start + size;
-        while current < end {
-            // Get box header.
-            let header = BoxHeader::read(reader)?;
-            let BoxHeader { name, size: s } = header;
-            if s > size {
-                return Err(Error::InvalidData(
-                    "moof box contains a box with a larger size than it",
-                ));
-            }
-
-            match name {
+        while let Some(mut bx) = reader.get_box()? {
+            match bx.kind {
                 BoxType::MfhdBox => {
-                    mfhd = Some(MfhdBox::read_box(reader, s)?);
+                    mfhd = Some(bx.read()?);
                 }
+
                 BoxType::TrafBox => {
-                    let traf = TrafBox::read_box(reader, s)?;
-                    trafs.push(traf);
+                    trafs.push(bx.read()?);
                 }
-                _ => {
-                    // XXX warn!()
-                    skip_box(reader, s)?;
-                }
+
+                _ => continue,
             }
-            current = reader.stream_position()?;
         }
 
         if mfhd.is_none() {
             return Err(Error::BoxNotFound(BoxType::MfhdBox));
         }
 
-        skip_bytes_to(reader, start + size)?;
-
         Ok(MoofBox {
             mfhd: mfhd.unwrap(),
             trafs,
         })
+    }
+
+    fn size_hint() -> usize {
+        MfhdBox::size_hint()
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for MoofBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         self.mfhd.write_box(writer)?;
         for traf in self.trafs.iter() {

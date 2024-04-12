@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 use std::mem::size_of;
 
 use crate::mp4box::*;
@@ -25,9 +25,7 @@ impl StcoBox {
 }
 
 impl Mp4Box for StcoBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::StcoBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -43,33 +41,23 @@ impl Mp4Box for StcoBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for StcoBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for StcoBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
-        let (version, flags) = read_box_header_ext(reader)?;
-
-        let header_size = HEADER_SIZE + HEADER_EXT_SIZE;
-        let other_size = size_of::<u32>(); // entry_count
         let entry_size = size_of::<u32>(); // chunk_offset
-        let entry_count = reader.read_u32::<BigEndian>()?;
-        if u64::from(entry_count)
-            > size
-                .saturating_sub(header_size)
-                .saturating_sub(other_size as u64)
-                / entry_size as u64
-        {
+        let entry_count = reader.get_u32();
+        if entry_count as usize > reader.remaining() / entry_size {
             return Err(Error::InvalidData(
                 "stco entry_count indicates more entries than could fit in the box",
             ));
         }
+
         let mut entries = Vec::with_capacity(entry_count as usize);
         for _i in 0..entry_count {
-            let chunk_offset = reader.read_u32::<BigEndian>()?;
+            let chunk_offset = reader.get_u32();
             entries.push(chunk_offset);
         }
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(StcoBox {
             version,
@@ -77,12 +65,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for StcoBox {
             entries,
         })
     }
+
+    fn size_hint() -> usize {
+        8
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for StcoBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -117,7 +109,6 @@ impl std::convert::TryFrom<&co64::Co64Box> for StcoBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_stco() {
@@ -130,12 +121,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::StcoBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::StcoBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = StcoBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = StcoBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

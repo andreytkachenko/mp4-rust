@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 
@@ -51,9 +51,7 @@ impl TfhdBox {
 }
 
 impl Mp4Box for TfhdBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::TfhdBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -69,39 +67,40 @@ impl Mp4Box for TfhdBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for TfhdBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for TfhdBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
+        let track_id = reader.get_u32();
 
-        let (version, flags) = read_box_header_ext(reader)?;
-        let track_id = reader.read_u32::<BigEndian>()?;
         let base_data_offset = if TfhdBox::FLAG_BASE_DATA_OFFSET & flags > 0 {
-            Some(reader.read_u64::<BigEndian>()?)
-        } else {
-            None
-        };
-        let sample_description_index = if TfhdBox::FLAG_SAMPLE_DESCRIPTION_INDEX & flags > 0 {
-            Some(reader.read_u32::<BigEndian>()?)
-        } else {
-            None
-        };
-        let default_sample_duration = if TfhdBox::FLAG_DEFAULT_SAMPLE_DURATION & flags > 0 {
-            Some(reader.read_u32::<BigEndian>()?)
-        } else {
-            None
-        };
-        let default_sample_size = if TfhdBox::FLAG_DEFAULT_SAMPLE_SIZE & flags > 0 {
-            Some(reader.read_u32::<BigEndian>()?)
-        } else {
-            None
-        };
-        let default_sample_flags = if TfhdBox::FLAG_DEFAULT_SAMPLE_FLAGS & flags > 0 {
-            Some(reader.read_u32::<BigEndian>()?)
+            Some(reader.get_u64())
         } else {
             None
         };
 
-        skip_bytes_to(reader, start + size)?;
+        let sample_description_index = if TfhdBox::FLAG_SAMPLE_DESCRIPTION_INDEX & flags > 0 {
+            Some(reader.get_u32())
+        } else {
+            None
+        };
+
+        let default_sample_duration = if TfhdBox::FLAG_DEFAULT_SAMPLE_DURATION & flags > 0 {
+            Some(reader.get_u32())
+        } else {
+            None
+        };
+
+        let default_sample_size = if TfhdBox::FLAG_DEFAULT_SAMPLE_SIZE & flags > 0 {
+            Some(reader.get_u32())
+        } else {
+            None
+        };
+
+        let default_sample_flags = if TfhdBox::FLAG_DEFAULT_SAMPLE_FLAGS & flags > 0 {
+            Some(reader.get_u32())
+        } else {
+            None
+        };
 
         Ok(TfhdBox {
             version,
@@ -114,12 +113,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for TfhdBox {
             default_sample_flags,
         })
     }
+
+    fn size_hint() -> usize {
+        8
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for TfhdBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
         writer.write_u32::<BigEndian>(self.track_id)?;
@@ -147,7 +150,6 @@ impl<W: Write> WriteBox<&mut W> for TfhdBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_tfhd() {
@@ -165,12 +167,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::TfhdBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::TfhdBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = TfhdBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = TfhdBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 
@@ -192,12 +194,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::TfhdBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::TfhdBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = TfhdBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = TfhdBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

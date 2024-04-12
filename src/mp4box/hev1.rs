@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 
@@ -59,9 +59,7 @@ impl Hev1Box {
 }
 
 impl Mp4Box for Hev1Box {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::Hev1Box;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -80,59 +78,54 @@ impl Mp4Box for Hev1Box {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for Hev1Box {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for Hev1Box {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        reader.get_u32(); // reserved
+        reader.get_u16(); // reserved
 
-        reader.read_u32::<BigEndian>()?; // reserved
-        reader.read_u16::<BigEndian>()?; // reserved
-        let data_reference_index = reader.read_u16::<BigEndian>()?;
+        let data_reference_index = reader.get_u16();
 
-        reader.read_u32::<BigEndian>()?; // pre-defined, reserved
-        reader.read_u64::<BigEndian>()?; // pre-defined
-        reader.read_u32::<BigEndian>()?; // pre-defined
-        let width = reader.read_u16::<BigEndian>()?;
-        let height = reader.read_u16::<BigEndian>()?;
-        let horizresolution = FixedPointU16::new_raw(reader.read_u32::<BigEndian>()?);
-        let vertresolution = FixedPointU16::new_raw(reader.read_u32::<BigEndian>()?);
-        reader.read_u32::<BigEndian>()?; // reserved
-        let frame_count = reader.read_u16::<BigEndian>()?;
-        skip_bytes(reader, 32)?; // compressorname
-        let depth = reader.read_u16::<BigEndian>()?;
-        reader.read_i16::<BigEndian>()?; // pre-defined
+        reader.get_u32(); // pre-defined, reserved
+        reader.get_u64(); // pre-defined
+        reader.get_u32(); // pre-defined
 
-        let header = BoxHeader::read(reader)?;
-        let BoxHeader { name, size: s } = header;
-        if s > size {
-            return Err(Error::InvalidData(
-                "hev1 box contains a box with a larger size than it",
-            ));
-        }
-        if name == BoxType::HvcCBox {
-            let hvcc = HvcCBox::read_box(reader, s)?;
+        let width = reader.get_u16();
+        let height = reader.get_u16();
 
-            skip_bytes_to(reader, start + size)?;
+        let horizresolution = FixedPointU16::new_raw(reader.get_u32());
+        let vertresolution = FixedPointU16::new_raw(reader.get_u32());
 
-            Ok(Hev1Box {
-                data_reference_index,
-                width,
-                height,
-                horizresolution,
-                vertresolution,
-                frame_count,
-                depth,
-                hvcc,
-            })
-        } else {
-            Err(Error::InvalidData("hvcc not found"))
-        }
+        reader.get_u32(); // reserved
+
+        let frame_count = reader.get_u16();
+
+        reader.skip(32); // compressorname
+
+        let depth = reader.get_u16();
+
+        reader.get_i16(); // pre-defined
+
+        Ok(Hev1Box {
+            data_reference_index,
+            width,
+            height,
+            horizresolution,
+            vertresolution,
+            frame_count,
+            depth,
+            hvcc: reader.find_box::<HvcCBox>()?,
+        })
+    }
+
+    fn size_hint() -> usize {
+        78
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for Hev1Box {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         writer.write_u32::<BigEndian>(0)?; // reserved
         writer.write_u16::<BigEndian>(0)?; // reserved
@@ -190,9 +183,7 @@ impl HvcCBox {
 }
 
 impl Mp4Box for HvcCBox {
-    fn box_type(&self) -> BoxType {
-        BoxType::HvcCBox
-    }
+    const TYPE: BoxType = BoxType::HvcCBox;
 
     fn box_size(&self) -> u64 {
         HEADER_SIZE
@@ -244,45 +235,56 @@ pub struct HvcCArray {
     pub nalus: Vec<HvcCArrayNalu>,
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for HvcCBox {
-    fn read_box(reader: &mut R, _size: u64) -> Result<Self> {
-        let configuration_version = reader.read_u8()?;
-        let params = reader.read_u8()?;
+impl BlockReader for HvcCBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let configuration_version = reader.get_u8();
+        let params = reader.get_u8();
         let general_profile_space = params & 0b11000000 >> 6;
         let general_tier_flag = (params & 0b00100000 >> 5) > 0;
         let general_profile_idc = params & 0b00011111;
 
-        let general_profile_compatibility_flags = reader.read_u32::<BigEndian>()?;
-        let general_constraint_indicator_flag = reader.read_u48::<BigEndian>()?;
-        let general_level_idc = reader.read_u8()?;
-        let min_spatial_segmentation_idc = reader.read_u16::<BigEndian>()? & 0x0FFF;
-        let parallelism_type = reader.read_u8()? & 0b11;
-        let chroma_format_idc = reader.read_u8()? & 0b11;
-        let bit_depth_luma_minus8 = reader.read_u8()? & 0b111;
-        let bit_depth_chroma_minus8 = reader.read_u8()? & 0b111;
-        let avg_frame_rate = reader.read_u16::<BigEndian>()?;
+        let general_profile_compatibility_flags = reader.get_u32();
+        let general_constraint_indicator_flag = reader.get_u48();
 
-        let params = reader.read_u8()?;
+        let general_level_idc = reader.get_u8();
+        let min_spatial_segmentation_idc = reader.get_u16() & 0x0FFF;
+        let parallelism_type = reader.get_u8() & 0b11;
+        let chroma_format_idc = reader.get_u8() & 0b11;
+        let bit_depth_luma_minus8 = reader.get_u8() & 0b111;
+        let bit_depth_chroma_minus8 = reader.get_u8() & 0b111;
+        let avg_frame_rate = reader.get_u16();
+
+        let params = reader.get_u8();
         let constant_frame_rate = params & 0b11000000 >> 6;
         let num_temporal_layers = params & 0b00111000 >> 3;
         let temporal_id_nested = (params & 0b00000100 >> 2) > 0;
         let length_size_minus_one = params & 0b000011;
 
-        let num_of_arrays = reader.read_u8()?;
+        let num_of_arrays = reader.get_u8();
+
+        if reader.remaining() < num_of_arrays as usize * 3 {
+            return Err(Error::InvalidData(""));
+        }
 
         let mut arrays = Vec::with_capacity(num_of_arrays as _);
+
         for _ in 0..num_of_arrays {
-            let params = reader.read_u8()?;
-            let num_nalus = reader.read_u16::<BigEndian>()?;
+            let params = reader.get_u8();
+            let num_nalus = reader.get_u16();
+
+            if reader.remaining() < num_nalus as usize * 2 {
+                return Err(Error::InvalidData(""));
+            }
+
             let mut nalus = Vec::with_capacity(num_nalus as usize);
 
             for _ in 0..num_nalus {
-                let size = reader.read_u16::<BigEndian>()?;
-                let mut data = vec![0; size as usize];
+                let size = reader.get_u16();
 
-                reader.read_exact(&mut data)?;
-
-                nalus.push(HvcCArrayNalu { size, data })
+                nalus.push(HvcCArrayNalu {
+                    size,
+                    data: reader.collect(size as _)?,
+                })
             }
 
             arrays.push(HvcCArray {
@@ -313,12 +315,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for HvcCBox {
             arrays,
         })
     }
+
+    fn size_hint() -> usize {
+        23
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for HvcCBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         writer.write_u8(self.configuration_version)?;
         let general_profile_space = (self.general_profile_space & 0b11) << 6;
@@ -363,7 +369,6 @@ impl<W: Write> WriteBox<&mut W> for HvcCBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_hev1() {
@@ -384,12 +389,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::Hev1Box);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::Hev1Box);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = Hev1Box::read_box(&mut reader, header.size).unwrap();
+        let dst_box = Hev1Box::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

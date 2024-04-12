@@ -1,7 +1,9 @@
+use mp4::Mp4Header;
 use std::env;
-use std::fs::File;
+use tokio::fs::File;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
@@ -10,10 +12,11 @@ fn main() {
     }
 
     let filename = &args[1];
-    let f = File::open(filename).unwrap();
-    let mp4 = mp4::read_mp4(f).unwrap();
+    let mut f = File::open(filename).await.unwrap();
 
-    println!("Major Brand: {}", mp4.major_brand());
+    let mp4 = Mp4Header::read(&mut f, Some(())).await.unwrap();
+
+    println!("Major Brand: {:?}", mp4.major_brand());
 
     for track in mp4.tracks().values() {
         println!(

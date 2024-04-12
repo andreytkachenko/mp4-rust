@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::meta::MetaBox;
 use crate::mp4box::*;
@@ -43,9 +43,7 @@ impl MoovBox {
 }
 
 impl Mp4Box for MoovBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::MoovBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -61,9 +59,9 @@ impl Mp4Box for MoovBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for MoovBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for MoovBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        println!("begin reading moov");
 
         let mut mvhd = None;
         let mut meta = None;
@@ -71,50 +69,37 @@ impl<R: Read + Seek> ReadBox<&mut R> for MoovBox {
         let mut mvex = None;
         let mut traks = Vec::new();
 
-        let mut current = reader.stream_position()?;
-        let end = start + size;
-        while current < end {
-            // Get box header.
-            let header = BoxHeader::read(reader)?;
-            let BoxHeader { name, size: s } = header;
-            if s > size {
-                return Err(Error::InvalidData(
-                    "moov box contains a box with a larger size than it",
-                ));
-            }
-
-            match name {
+        while let Some(mut bx) = reader.get_box()? {
+            match bx.kind {
                 BoxType::MvhdBox => {
-                    mvhd = Some(MvhdBox::read_box(reader, s)?);
+                    mvhd = Some(bx.read()?);
                 }
-                BoxType::MetaBox => {
-                    meta = Some(MetaBox::read_box(reader, s)?);
-                }
-                BoxType::MvexBox => {
-                    mvex = Some(MvexBox::read_box(reader, s)?);
-                }
-                BoxType::TrakBox => {
-                    let trak = TrakBox::read_box(reader, s)?;
-                    traks.push(trak);
-                }
-                BoxType::UdtaBox => {
-                    udta = Some(UdtaBox::read_box(reader, s)?);
-                }
-                _ => {
-                    // XXX warn!()
-                    skip_box(reader, s)?;
-                }
-            }
 
-            current = reader.stream_position()?;
+                BoxType::MetaBox => {
+                    meta = Some(bx.read()?);
+                }
+
+                BoxType::MvexBox => {
+                    mvex = Some(bx.read()?);
+                }
+
+                BoxType::TrakBox => {
+                    traks.push(bx.read()?);
+                }
+
+                BoxType::UdtaBox => {
+                    udta = Some(bx.read()?);
+                }
+
+                _ => continue,
+            }
         }
 
         if mvhd.is_none() {
             return Err(Error::BoxNotFound(BoxType::MvhdBox));
         }
 
-        skip_bytes_to(reader, start + size)?;
-
+        println!("end reading moov");
         Ok(MoovBox {
             mvhd: mvhd.unwrap(),
             meta,
@@ -123,12 +108,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for MoovBox {
             traks,
         })
     }
+
+    fn size_hint() -> usize {
+        MvhdBox::size_hint()
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for MoovBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         self.mvhd.write_box(writer)?;
         for trak in self.traks.iter() {
@@ -148,7 +137,6 @@ impl<W: Write> WriteBox<&mut W> for MoovBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_moov() {
@@ -164,12 +152,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::MoovBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::MoovBox);
         assert_eq!(header.size, src_box.box_size());
 
-        let dst_box = MoovBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = MoovBox::read_block(&mut reader).unwrap();
         assert_eq!(dst_box, src_box);
     }
 
@@ -181,12 +169,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::MoovBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::MoovBox);
         assert_eq!(header.size, src_box.box_size());
 
-        let dst_box = MoovBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = MoovBox::read_block(&mut reader).unwrap();
         assert_eq!(dst_box, src_box);
     }
 }

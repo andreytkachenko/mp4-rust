@@ -1,9 +1,5 @@
-use std::{
-    convert::TryFrom,
-    io::{Read, Seek},
-};
-
 use serde::Serialize;
+use std::convert::TryFrom;
 
 use crate::mp4box::*;
 
@@ -28,9 +24,7 @@ impl DataBox {
 }
 
 impl Mp4Box for DataBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::DataBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -46,26 +40,26 @@ impl Mp4Box for DataBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for DataBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for DataBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let data_type = DataType::try_from(reader.get_u32())?;
+        reader.get_u32(); // reserved = 0
 
-        let data_type = DataType::try_from(reader.read_u32::<BigEndian>()?)?;
+        Ok(DataBox {
+            data: reader.collect(reader.remaining())?,
+            data_type,
+        })
+    }
 
-        reader.read_u32::<BigEndian>()?; // reserved = 0
-
-        let current = reader.stream_position()?;
-        let mut data = vec![0u8; (start + size - current) as usize];
-        reader.read_exact(&mut data)?;
-
-        Ok(DataBox { data, data_type })
+    fn size_hint() -> usize {
+        8
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for DataBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         writer.write_u32::<BigEndian>(self.data_type.clone() as u32)?;
         writer.write_u32::<BigEndian>(0)?; // reserved = 0
@@ -79,7 +73,6 @@ impl<W: Write> WriteBox<&mut W> for DataBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_data() {
@@ -91,12 +84,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::DataBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::DataBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = DataBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = DataBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 
@@ -107,12 +100,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::DataBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::DataBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = DataBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = DataBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

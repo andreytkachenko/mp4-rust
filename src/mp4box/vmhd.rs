@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 
@@ -30,9 +30,7 @@ impl VmhdBox {
 }
 
 impl Mp4Box for VmhdBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::VmhdBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -51,20 +49,15 @@ impl Mp4Box for VmhdBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for VmhdBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
-        let (version, flags) = read_box_header_ext(reader)?;
-
-        let graphics_mode = reader.read_u16::<BigEndian>()?;
+impl BlockReader for VmhdBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
+        let graphics_mode = reader.get_u16();
         let op_color = RgbColor {
-            red: reader.read_u16::<BigEndian>()?,
-            green: reader.read_u16::<BigEndian>()?,
-            blue: reader.read_u16::<BigEndian>()?,
+            red: reader.get_u16(),
+            green: reader.get_u16(),
+            blue: reader.get_u16(),
         };
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(VmhdBox {
             version,
@@ -73,12 +66,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for VmhdBox {
             op_color,
         })
     }
+
+    fn size_hint() -> usize {
+        12
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for VmhdBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -95,7 +92,6 @@ impl<W: Write> WriteBox<&mut W> for VmhdBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_vmhd() {
@@ -113,12 +109,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::VmhdBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::VmhdBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = VmhdBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = VmhdBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

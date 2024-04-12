@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 use std::mem::size_of;
 
 use crate::mp4box::*;
@@ -39,9 +39,7 @@ impl ElstBox {
 }
 
 impl Mp4Box for ElstBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::ElstBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -57,15 +55,11 @@ impl Mp4Box for ElstBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for ElstBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for ElstBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
-        let (version, flags) = read_box_header_ext(reader)?;
-
-        let header_size = HEADER_SIZE + HEADER_EXT_SIZE;
-        let entry_count = reader.read_u32::<BigEndian>()?;
-        let other_size = size_of::<i32>(); // entry_count
+        let entry_count = reader.get_u32();
         let entry_size = {
             let mut entry_size = 0;
             entry_size += if version == 1 {
@@ -73,43 +67,32 @@ impl<R: Read + Seek> ReadBox<&mut R> for ElstBox {
             } else {
                 size_of::<u32>() + size_of::<i32>() // segment_duration + media_time
             };
+
             entry_size += size_of::<i16>() + size_of::<i16>(); // media_rate_integer + media_rate_fraction
             entry_size
         };
-        if u64::from(entry_count)
-            > size
-                .saturating_sub(header_size)
-                .saturating_sub(other_size as u64)
-                / entry_size as u64
-        {
+
+        if entry_count as usize > reader.remaining() / entry_size {
             return Err(Error::InvalidData(
                 "elst entry_count indicates more entries than could fit in the box",
             ));
         }
+
         let mut entries = Vec::with_capacity(entry_count as usize);
         for _ in 0..entry_count {
             let (segment_duration, media_time) = if version == 1 {
-                (
-                    reader.read_u64::<BigEndian>()?,
-                    reader.read_u64::<BigEndian>()?,
-                )
+                (reader.get_u64(), reader.get_u64())
             } else {
-                (
-                    reader.read_u32::<BigEndian>()? as u64,
-                    reader.read_u32::<BigEndian>()? as u64,
-                )
+                (reader.get_u32() as u64, reader.get_u32() as u64)
             };
 
-            let entry = ElstEntry {
+            entries.push(ElstEntry {
                 segment_duration,
                 media_time,
-                media_rate: reader.read_u16::<BigEndian>()?,
-                media_rate_fraction: reader.read_u16::<BigEndian>()?,
-            };
-            entries.push(entry);
+                media_rate: reader.get_u16(),
+                media_rate_fraction: reader.get_u16(),
+            });
         }
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(ElstBox {
             version,
@@ -117,12 +100,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for ElstBox {
             entries,
         })
     }
+
+    fn size_hint() -> usize {
+        8
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for ElstBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -147,7 +134,6 @@ impl<W: Write> WriteBox<&mut W> for ElstBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_elst32() {
@@ -165,12 +151,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::ElstBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::ElstBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = ElstBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = ElstBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 
@@ -190,12 +176,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::ElstBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::ElstBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = ElstBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = ElstBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

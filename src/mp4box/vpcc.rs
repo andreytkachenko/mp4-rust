@@ -23,9 +23,7 @@ impl VpccBox {
 }
 
 impl Mp4Box for VpccBox {
-    fn box_type(&self) -> BoxType {
-        BoxType::VpccBox
-    }
+    const TYPE: BoxType = BoxType::VpccBox;
 
     fn box_size(&self) -> u64 {
         HEADER_SIZE + HEADER_EXT_SIZE + 8
@@ -40,22 +38,20 @@ impl Mp4Box for VpccBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for VpccBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-        let (version, flags) = read_box_header_ext(reader)?;
+impl BlockReader for VpccBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
-        let profile: u8 = reader.read_u8()?;
-        let level: u8 = reader.read_u8()?;
+        let profile: u8 = reader.get_u8();
+        let level: u8 = reader.get_u8();
         let (bit_depth, chroma_subsampling, video_full_range_flag) = {
-            let b = reader.read_u8()?;
+            let b = reader.get_u8();
             (b >> 4, b << 4 >> 5, b & 0x01 == 1)
         };
-        let transfer_characteristics: u8 = reader.read_u8()?;
-        let matrix_coefficients: u8 = reader.read_u8()?;
-        let codec_initialization_data_size: u16 = reader.read_u16::<BigEndian>()?;
 
-        skip_bytes_to(reader, start + size)?;
+        let transfer_characteristics: u8 = reader.get_u8();
+        let matrix_coefficients: u8 = reader.get_u8();
+        let codec_initialization_data_size: u16 = reader.get_u16();
 
         Ok(Self {
             version,
@@ -71,12 +67,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for VpccBox {
             codec_initialization_data_size,
         })
     }
+
+    fn size_hint() -> usize {
+        11
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for VpccBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -100,7 +100,6 @@ impl<W: Write> WriteBox<&mut W> for VpccBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_vpcc() {
@@ -121,12 +120,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::VpccBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::VpccBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = VpccBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = VpccBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

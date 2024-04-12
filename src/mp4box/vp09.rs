@@ -66,9 +66,7 @@ impl Vp09Box {
 }
 
 impl Mp4Box for Vp09Box {
-    fn box_type(&self) -> BoxType {
-        BoxType::Vp09Box
-    }
+    const TYPE: BoxType = BoxType::Vp09Box;
 
     fn box_size(&self) -> u64 {
         0x6A
@@ -83,53 +81,37 @@ impl Mp4Box for Vp09Box {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for Vp09Box {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-        let (version, flags) = read_box_header_ext(reader)?;
+impl BlockReader for Vp09Box {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
-        let start_code: u16 = reader.read_u16::<BigEndian>()?;
-        let data_reference_index: u16 = reader.read_u16::<BigEndian>()?;
+        let start_code: u16 = reader.get_u16();
+        let data_reference_index: u16 = reader.get_u16();
         let reserved0: [u8; 16] = {
             let mut buf = [0u8; 16];
-            reader.read_exact(&mut buf)?;
+            reader.copy_to_slice(&mut buf)?;
             buf
         };
-        let width: u16 = reader.read_u16::<BigEndian>()?;
-        let height: u16 = reader.read_u16::<BigEndian>()?;
-        let horizresolution: (u16, u16) = (
-            reader.read_u16::<BigEndian>()?,
-            reader.read_u16::<BigEndian>()?,
-        );
-        let vertresolution: (u16, u16) = (
-            reader.read_u16::<BigEndian>()?,
-            reader.read_u16::<BigEndian>()?,
-        );
+
+        let width: u16 = reader.get_u16();
+        let height: u16 = reader.get_u16();
+        let horizresolution: (u16, u16) = (reader.get_u16(), reader.get_u16());
+        let vertresolution: (u16, u16) = (reader.get_u16(), reader.get_u16());
         let reserved1: [u8; 4] = {
             let mut buf = [0u8; 4];
-            reader.read_exact(&mut buf)?;
+            reader.copy_to_slice(&mut buf)?;
             buf
         };
-        let frame_count: u16 = reader.read_u16::<BigEndian>()?;
+
+        let frame_count: u16 = reader.get_u16();
         let compressorname: [u8; 32] = {
             let mut buf = [0u8; 32];
-            reader.read_exact(&mut buf)?;
+            reader.copy_to_slice(&mut buf)?;
             buf
         };
-        let depth: u16 = reader.read_u16::<BigEndian>()?;
-        let end_code: u16 = reader.read_u16::<BigEndian>()?;
 
-        let vpcc = {
-            let header = BoxHeader::read(reader)?;
-            if header.size > size {
-                return Err(Error::InvalidData(
-                    "vp09 box contains a box with a larger size than it",
-                ));
-            }
-            VpccBox::read_box(reader, header.size)?
-        };
-
-        skip_bytes_to(reader, start + size)?;
+        let depth: u16 = reader.get_u16();
+        let end_code: u16 = reader.get_u16();
 
         Ok(Self {
             version,
@@ -146,15 +128,19 @@ impl<R: Read + Seek> ReadBox<&mut R> for Vp09Box {
             compressorname,
             depth,
             end_code,
-            vpcc,
+            vpcc: reader.find_box::<VpccBox>()?,
         })
+    }
+
+    fn size_hint() -> usize {
+        78
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for Vp09Box {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -182,7 +168,6 @@ impl<W: Write> WriteBox<&mut W> for Vp09Box {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_vpcc() {
@@ -194,12 +179,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::Vp09Box);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::Vp09Box);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = Vp09Box::read_box(&mut reader, header.size).unwrap();
+        let dst_box = Vp09Box::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

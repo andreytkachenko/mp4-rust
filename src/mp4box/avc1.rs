@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 
@@ -49,19 +49,17 @@ impl Avc1Box {
         }
     }
 
-    pub fn get_type(&self) -> BoxType {
-        BoxType::Avc1Box
-    }
-
     pub fn get_size(&self) -> u64 {
         HEADER_SIZE + 8 + 70 + self.avcc.box_size()
+    }
+
+    fn box_type(&self) -> BoxType {
+        BoxType::Avc1Box
     }
 }
 
 impl Mp4Box for Avc1Box {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::Avc1Box;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -80,59 +78,47 @@ impl Mp4Box for Avc1Box {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for Avc1Box {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for Avc1Box {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        reader.get_u32(); // reserved
+        reader.get_u16(); // reserved
 
-        reader.read_u32::<BigEndian>()?; // reserved
-        reader.read_u16::<BigEndian>()?; // reserved
-        let data_reference_index = reader.read_u16::<BigEndian>()?;
+        let data_reference_index = reader.get_u16();
 
-        reader.read_u32::<BigEndian>()?; // pre-defined, reserved
-        reader.read_u64::<BigEndian>()?; // pre-defined
-        reader.read_u32::<BigEndian>()?; // pre-defined
-        let width = reader.read_u16::<BigEndian>()?;
-        let height = reader.read_u16::<BigEndian>()?;
-        let horizresolution = FixedPointU16::new_raw(reader.read_u32::<BigEndian>()?);
-        let vertresolution = FixedPointU16::new_raw(reader.read_u32::<BigEndian>()?);
-        reader.read_u32::<BigEndian>()?; // reserved
-        let frame_count = reader.read_u16::<BigEndian>()?;
-        skip_bytes(reader, 32)?; // compressorname
-        let depth = reader.read_u16::<BigEndian>()?;
-        reader.read_i16::<BigEndian>()?; // pre-defined
+        reader.get_u32(); // pre-defined, reserved
+        reader.get_u64(); // pre-defined
+        reader.get_u32(); // pre-defined
 
-        let end = start + size;
-        loop {
-            let current = reader.stream_position()?;
-            if current >= end {
-                return Err(Error::InvalidData("avcc not found"));
-            }
-            let header = BoxHeader::read(reader)?;
-            let BoxHeader { name, size: s } = header;
-            if s > size {
-                return Err(Error::InvalidData(
-                    "avc1 box contains a box with a larger size than it",
-                ));
-            }
-            if name == BoxType::AvcCBox {
-                let avcc = AvcCBox::read_box(reader, s)?;
+        let width = reader.get_u16();
+        let height = reader.get_u16();
 
-                skip_bytes_to(reader, start + size)?;
+        let horizresolution = FixedPointU16::new_raw(reader.get_u32());
+        let vertresolution = FixedPointU16::new_raw(reader.get_u32());
 
-                return Ok(Avc1Box {
-                    data_reference_index,
-                    width,
-                    height,
-                    horizresolution,
-                    vertresolution,
-                    frame_count,
-                    depth,
-                    avcc,
-                });
-            } else {
-                skip_bytes_to(reader, current + s)?;
-            }
-        }
+        reader.get_u32(); // reserved
+
+        let frame_count = reader.get_u16();
+
+        reader.skip(32); // compressorname
+
+        let depth = reader.get_u16();
+
+        reader.get_i16(); // pre-defined
+
+        Ok(Avc1Box {
+            data_reference_index,
+            width,
+            height,
+            horizresolution,
+            vertresolution,
+            frame_count,
+            depth,
+            avcc: reader.find_box::<AvcCBox>()?,
+        })
+    }
+
+    fn size_hint() -> usize {
+        78
     }
 }
 
@@ -191,9 +177,7 @@ impl AvcCBox {
 }
 
 impl Mp4Box for AvcCBox {
-    fn box_type(&self) -> BoxType {
-        BoxType::AvcCBox
-    }
+    const TYPE: BoxType = BoxType::AvcCBox;
 
     fn box_size(&self) -> u64 {
         let mut size = HEADER_SIZE + 7;
@@ -216,29 +200,28 @@ impl Mp4Box for AvcCBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for AvcCBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for AvcCBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let configuration_version = reader.get_u8();
+        let avc_profile_indication = reader.get_u8();
+        let profile_compatibility = reader.get_u8();
+        let avc_level_indication = reader.get_u8();
+        let length_size_minus_one = reader.get_u8() & 0x3;
+        let num_of_spss = reader.get_u8() & 0x1F;
 
-        let configuration_version = reader.read_u8()?;
-        let avc_profile_indication = reader.read_u8()?;
-        let profile_compatibility = reader.read_u8()?;
-        let avc_level_indication = reader.read_u8()?;
-        let length_size_minus_one = reader.read_u8()? & 0x3;
-        let num_of_spss = reader.read_u8()? & 0x1F;
         let mut sequence_parameter_sets = Vec::with_capacity(num_of_spss as usize);
         for _ in 0..num_of_spss {
             let nal_unit = NalUnit::read(reader)?;
             sequence_parameter_sets.push(nal_unit);
         }
-        let num_of_ppss = reader.read_u8()?;
+
+        let num_of_ppss = reader.get_u8();
+
         let mut picture_parameter_sets = Vec::with_capacity(num_of_ppss as usize);
         for _ in 0..num_of_ppss {
             let nal_unit = NalUnit::read(reader)?;
             picture_parameter_sets.push(nal_unit);
         }
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(AvcCBox {
             configuration_version,
@@ -250,12 +233,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for AvcCBox {
             picture_parameter_sets,
         })
     }
+
+    fn size_hint() -> usize {
+        7
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for AvcCBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         writer.write_u8(self.configuration_version)?;
         writer.write_u8(self.avc_profile_indication)?;
@@ -292,11 +279,12 @@ impl NalUnit {
         2 + self.bytes.len()
     }
 
-    fn read<R: Read + Seek>(reader: &mut R) -> Result<Self> {
-        let length = reader.read_u16::<BigEndian>()? as usize;
-        let mut bytes = vec![0u8; length];
-        reader.read_exact(&mut bytes)?;
-        Ok(NalUnit { bytes })
+    fn read<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let length = reader.try_get_u16()? as usize;
+
+        Ok(NalUnit {
+            bytes: reader.collect(length)?,
+        })
     }
 
     fn write<W: Write>(&self, writer: &mut W) -> Result<u64> {
@@ -310,7 +298,6 @@ impl NalUnit {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_avc1() {
@@ -343,12 +330,11 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::Avc1Box);
+        let header = BoxHeader::read_sync(&mut buf.as_slice()).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::Avc1Box);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = Avc1Box::read_box(&mut reader, header.size).unwrap();
+        let dst_box = Avc1Box::read_block(&mut buf.as_slice()).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

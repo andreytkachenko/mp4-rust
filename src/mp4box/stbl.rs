@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 use crate::mp4box::{
@@ -55,9 +55,7 @@ impl StblBox {
 }
 
 impl Mp4Box for StblBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::StblBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -73,10 +71,8 @@ impl Mp4Box for StblBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for StblBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
+impl BlockReader for StblBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
         let mut stsd = None;
         let mut stts = None;
         let mut ctts = None;
@@ -86,68 +82,63 @@ impl<R: Read + Seek> ReadBox<&mut R> for StblBox {
         let mut stco = None;
         let mut co64 = None;
 
-        let mut current = reader.stream_position()?;
-        let end = start + size;
-        while current < end {
-            // Get box header.
-            let header = BoxHeader::read(reader)?;
-            let BoxHeader { name, size: s } = header;
-            if s > size {
-                return Err(Error::InvalidData(
-                    "stbl box contains a box with a larger size than it",
-                ));
-            }
-
-            match name {
+        while let Some(mut bx) = reader.get_box()? {
+            match bx.kind {
                 BoxType::StsdBox => {
-                    stsd = Some(StsdBox::read_box(reader, s)?);
+                    stsd = Some(bx.read()?);
                 }
+
                 BoxType::SttsBox => {
-                    stts = Some(SttsBox::read_box(reader, s)?);
+                    stts = Some(bx.read()?);
                 }
+
                 BoxType::CttsBox => {
-                    ctts = Some(CttsBox::read_box(reader, s)?);
+                    ctts = Some(bx.read()?);
                 }
+
                 BoxType::StssBox => {
-                    stss = Some(StssBox::read_box(reader, s)?);
+                    stss = Some(bx.read()?);
                 }
+
                 BoxType::StscBox => {
-                    stsc = Some(StscBox::read_box(reader, s)?);
+                    stsc = Some(bx.read()?);
                 }
+
                 BoxType::StszBox => {
-                    stsz = Some(StszBox::read_box(reader, s)?);
+                    stsz = Some(bx.read()?);
                 }
+
                 BoxType::StcoBox => {
-                    stco = Some(StcoBox::read_box(reader, s)?);
+                    stco = Some(bx.read()?);
                 }
+
                 BoxType::Co64Box => {
-                    co64 = Some(Co64Box::read_box(reader, s)?);
+                    co64 = Some(bx.read()?);
                 }
-                _ => {
-                    // XXX warn!()
-                    skip_box(reader, s)?;
-                }
+
+                _ => continue,
             }
-            current = reader.stream_position()?;
         }
 
         if stsd.is_none() {
             return Err(Error::BoxNotFound(BoxType::StsdBox));
         }
+
         if stts.is_none() {
             return Err(Error::BoxNotFound(BoxType::SttsBox));
         }
+
         if stsc.is_none() {
             return Err(Error::BoxNotFound(BoxType::StscBox));
         }
+
         if stsz.is_none() {
             return Err(Error::BoxNotFound(BoxType::StszBox));
         }
+
         if stco.is_none() && co64.is_none() {
             return Err(Error::Box2NotFound(BoxType::StcoBox, BoxType::Co64Box));
         }
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(StblBox {
             stsd: stsd.unwrap(),
@@ -160,12 +151,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for StblBox {
             co64,
         })
     }
+
+    fn size_hint() -> usize {
+        StsdBox::size_hint() + SttsBox::size_hint() + StscBox::size_hint() + StszBox::size_hint()
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for StblBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         self.stsd.write_box(writer)?;
         self.stts.write_box(writer)?;

@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{Read, Seek};
 
 use byteorder::ByteOrder;
 use serde::Serialize;
@@ -10,7 +9,7 @@ use crate::mp4box::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct IlstBox {
-    pub items: HashMap<MetadataKey, IlstItemBox>,
+    pub items: HashMap<MetadataKey, DataBox>,
 }
 
 impl IlstBox {
@@ -28,9 +27,7 @@ impl IlstBox {
 }
 
 impl Mp4Box for IlstBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::IlstBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -46,56 +43,52 @@ impl Mp4Box for IlstBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for IlstBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
+impl BlockReader for IlstBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
         let mut items = HashMap::new();
 
-        let mut current = reader.stream_position()?;
-        let end = start + size;
-        while current < end {
-            // Get box header.
-            let header = BoxHeader::read(reader)?;
-            let BoxHeader { name, size: s } = header;
-            if s > size {
-                return Err(Error::InvalidData(
-                    "ilst box contains a box with a larger size than it",
-                ));
-            }
-
-            match name {
+        while let Some(mut bx) = reader.get_box()? {
+            match bx.kind {
                 BoxType::NameBox => {
-                    items.insert(MetadataKey::Title, IlstItemBox::read_box(reader, s)?);
+                    if let Some(title) = bx.inner.try_find_box::<DataBox>()? {
+                        items.insert(MetadataKey::Title, title);
+                    }
                 }
-                BoxType::DayBox => {
-                    items.insert(MetadataKey::Year, IlstItemBox::read_box(reader, s)?);
-                }
-                BoxType::CovrBox => {
-                    items.insert(MetadataKey::Poster, IlstItemBox::read_box(reader, s)?);
-                }
-                BoxType::DescBox => {
-                    items.insert(MetadataKey::Summary, IlstItemBox::read_box(reader, s)?);
-                }
-                _ => {
-                    // XXX warn!()
-                    skip_box(reader, s)?;
-                }
-            }
 
-            current = reader.stream_position()?;
+                BoxType::DayBox => {
+                    if let Some(day) = bx.inner.try_find_box::<DataBox>()? {
+                        items.insert(MetadataKey::Year, day);
+                    }
+                }
+
+                BoxType::CovrBox => {
+                    if let Some(cover) = bx.inner.try_find_box::<DataBox>()? {
+                        items.insert(MetadataKey::Poster, cover);
+                    }
+                }
+
+                BoxType::DescBox => {
+                    if let Some(summary) = bx.inner.try_find_box::<DataBox>()? {
+                        items.insert(MetadataKey::Summary, summary);
+                    }
+                }
+
+                _ => continue,
+            }
         }
 
-        skip_bytes_to(reader, start + size)?;
-
         Ok(IlstBox { items })
+    }
+
+    fn size_hint() -> usize {
+        0
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for IlstBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         for (key, value) in &self.items {
             let name = match key {
@@ -104,64 +97,11 @@ impl<W: Write> WriteBox<&mut W> for IlstBox {
                 MetadataKey::Poster => BoxType::CovrBox,
                 MetadataKey::Summary => BoxType::DescBox,
             };
+
             BoxHeader::new(name, value.get_size()).write(writer)?;
-            value.data.write_box(writer)?;
+            value.write_box(writer)?;
         }
         Ok(size)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
-pub struct IlstItemBox {
-    pub data: DataBox,
-}
-
-impl IlstItemBox {
-    fn get_size(&self) -> u64 {
-        HEADER_SIZE + self.data.box_size()
-    }
-}
-
-impl<R: Read + Seek> ReadBox<&mut R> for IlstItemBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
-        let mut data = None;
-
-        let mut current = reader.stream_position()?;
-        let end = start + size;
-        while current < end {
-            // Get box header.
-            let header = BoxHeader::read(reader)?;
-            let BoxHeader { name, size: s } = header;
-            if s > size {
-                return Err(Error::InvalidData(
-                    "ilst item box contains a box with a larger size than it",
-                ));
-            }
-
-            match name {
-                BoxType::DataBox => {
-                    data = Some(DataBox::read_box(reader, s)?);
-                }
-                _ => {
-                    // XXX warn!()
-                    skip_box(reader, s)?;
-                }
-            }
-
-            current = reader.stream_position()?;
-        }
-
-        if data.is_none() {
-            return Err(Error::BoxNotFound(BoxType::DataBox));
-        }
-
-        skip_bytes_to(reader, start + size)?;
-
-        Ok(IlstItemBox {
-            data: data.unwrap(),
-        })
     }
 }
 
@@ -183,18 +123,18 @@ impl<'a> Metadata<'a> for IlstBox {
     }
 }
 
-fn item_to_bytes(item: &IlstItemBox) -> &[u8] {
-    &item.data.data
+fn item_to_bytes(item: &DataBox) -> &[u8] {
+    &item.data
 }
 
-fn item_to_str(item: &IlstItemBox) -> Cow<str> {
-    String::from_utf8_lossy(&item.data.data)
+fn item_to_str(item: &DataBox) -> Cow<str> {
+    String::from_utf8_lossy(&item.data)
 }
 
-fn item_to_u32(item: &IlstItemBox) -> Option<u32> {
-    match item.data.data_type {
-        DataType::Binary if item.data.data.len() == 4 => Some(BigEndian::read_u32(&item.data.data)),
-        DataType::Text => String::from_utf8_lossy(&item.data.data).parse::<u32>().ok(),
+fn item_to_u32(item: &DataBox) -> Option<u32> {
+    match item.data_type {
+        DataType::Binary if item.data.len() == 4 => Some(BigEndian::read_u32(&item.data)),
+        DataType::Text => String::from_utf8_lossy(&item.data).parse::<u32>().ok(),
         _ => None,
     }
 }
@@ -203,22 +143,20 @@ fn item_to_u32(item: &IlstItemBox) -> Option<u32> {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_ilst() {
-        let src_year = IlstItemBox {
-            data: DataBox {
-                data_type: DataType::Text,
-                data: b"test_year".to_vec(),
-            },
+        let src_year = DataBox {
+            data_type: DataType::Text,
+            data: b"test_year".to_vec(),
         };
+
         let src_box = IlstBox {
             items: [
-                (MetadataKey::Title, IlstItemBox::default()),
+                (MetadataKey::Title, DataBox::default()),
                 (MetadataKey::Year, src_year),
-                (MetadataKey::Poster, IlstItemBox::default()),
-                (MetadataKey::Summary, IlstItemBox::default()),
+                (MetadataKey::Poster, DataBox::default()),
+                (MetadataKey::Summary, DataBox::default()),
             ]
             .into(),
         };
@@ -226,12 +164,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::IlstBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::IlstBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = IlstBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = IlstBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 
@@ -242,12 +180,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::IlstBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::IlstBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = IlstBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = IlstBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

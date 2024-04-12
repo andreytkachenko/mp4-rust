@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 use std::mem::size_of;
 
 use crate::mp4box::*;
@@ -15,10 +15,13 @@ pub struct TrunBox {
 
     #[serde(skip_serializing)]
     pub sample_durations: Vec<u32>,
+
     #[serde(skip_serializing)]
     pub sample_sizes: Vec<u32>,
+
     #[serde(skip_serializing)]
     pub sample_flags: Vec<u32>,
+
     #[serde(skip_serializing)]
     pub sample_cts: Vec<u32>,
 }
@@ -60,9 +63,7 @@ impl TrunBox {
 }
 
 impl Mp4Box for TrunBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::TrunBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -78,31 +79,25 @@ impl Mp4Box for TrunBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for TrunBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for TrunBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
-        let (version, flags) = read_box_header_ext(reader)?;
-
-        let header_size = HEADER_SIZE + HEADER_EXT_SIZE;
-        let other_size = size_of::<u32>() // sample_count
-            + if TrunBox::FLAG_DATA_OFFSET & flags > 0 { size_of::<i32>() } else { 0 } // data_offset
-            + if TrunBox::FLAG_FIRST_SAMPLE_FLAGS & flags > 0 { size_of::<u32>() } else { 0 }; // first_sample_flags
         let sample_size = if TrunBox::FLAG_SAMPLE_DURATION & flags > 0 { size_of::<u32>() } else { 0 } // sample_duration
             + if TrunBox::FLAG_SAMPLE_SIZE & flags > 0 { size_of::<u32>() } else { 0 } // sample_size
             + if TrunBox::FLAG_SAMPLE_FLAGS & flags > 0 { size_of::<u32>() } else { 0 } // sample_flags
             + if TrunBox::FLAG_SAMPLE_CTS & flags > 0 { size_of::<u32>() } else { 0 }; // sample_composition_time_offset
 
-        let sample_count = reader.read_u32::<BigEndian>()?;
+        let sample_count = reader.get_u32();
 
         let data_offset = if TrunBox::FLAG_DATA_OFFSET & flags > 0 {
-            Some(reader.read_i32::<BigEndian>()?)
+            Some(reader.try_get_i32()?)
         } else {
             None
         };
 
         let first_sample_flags = if TrunBox::FLAG_FIRST_SAMPLE_FLAGS & flags > 0 {
-            Some(reader.read_u32::<BigEndian>()?)
+            Some(reader.try_get_u32()?)
         } else {
             None
         };
@@ -111,51 +106,50 @@ impl<R: Read + Seek> ReadBox<&mut R> for TrunBox {
         let mut sample_sizes = Vec::new();
         let mut sample_flags = Vec::new();
         let mut sample_cts = Vec::new();
-        if u64::from(sample_count) * sample_size as u64
-            > size
-                .saturating_sub(header_size)
-                .saturating_sub(other_size as u64)
-        {
+
+        if sample_count as usize * sample_size > reader.remaining() {
             return Err(Error::InvalidData(
                 "trun sample_count indicates more values than could fit in the box",
             ));
         }
+
         if TrunBox::FLAG_SAMPLE_DURATION & flags > 0 {
             sample_durations.reserve(sample_count as usize);
         }
+
         if TrunBox::FLAG_SAMPLE_SIZE & flags > 0 {
             sample_sizes.reserve(sample_count as usize);
         }
+
         if TrunBox::FLAG_SAMPLE_FLAGS & flags > 0 {
             sample_flags.reserve(sample_count as usize);
         }
+
         if TrunBox::FLAG_SAMPLE_CTS & flags > 0 {
             sample_cts.reserve(sample_count as usize);
         }
 
         for _ in 0..sample_count {
             if TrunBox::FLAG_SAMPLE_DURATION & flags > 0 {
-                let duration = reader.read_u32::<BigEndian>()?;
+                let duration = reader.get_u32();
                 sample_durations.push(duration);
             }
 
             if TrunBox::FLAG_SAMPLE_SIZE & flags > 0 {
-                let sample_size = reader.read_u32::<BigEndian>()?;
+                let sample_size = reader.get_u32();
                 sample_sizes.push(sample_size);
             }
 
             if TrunBox::FLAG_SAMPLE_FLAGS & flags > 0 {
-                let sample_flag = reader.read_u32::<BigEndian>()?;
+                let sample_flag = reader.get_u32();
                 sample_flags.push(sample_flag);
             }
 
             if TrunBox::FLAG_SAMPLE_CTS & flags > 0 {
-                let cts = reader.read_u32::<BigEndian>()?;
+                let cts = reader.get_u32();
                 sample_cts.push(cts);
             }
         }
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(TrunBox {
             version,
@@ -169,12 +163,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for TrunBox {
             sample_cts,
         })
     }
+
+    fn size_hint() -> usize {
+        8
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for TrunBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -211,7 +209,6 @@ impl<W: Write> WriteBox<&mut W> for TrunBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_trun_same_size() {
@@ -230,12 +227,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::TrunBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::TrunBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = TrunBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = TrunBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 
@@ -259,12 +256,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::TrunBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::TrunBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = TrunBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = TrunBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

@@ -89,7 +89,7 @@ impl From<Vp9Config> for TrackConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Mp4Track {
     pub trak: TrakBox,
     pub trafs: Vec<TrafBox>,
@@ -261,7 +261,7 @@ impl Mp4Track {
 
     pub fn sequence_parameter_set(&self) -> Result<&[u8]> {
         if let Some(ref avc1) = self.trak.mdia.minf.stbl.stsd.avc1 {
-            match avc1.avcc.sequence_parameter_sets.get(0) {
+            match avc1.avcc.sequence_parameter_sets.first() {
                 Some(nal) => Ok(nal.bytes.as_ref()),
                 None => Err(Error::EntryInStblNotFound(
                     self.track_id(),
@@ -276,7 +276,7 @@ impl Mp4Track {
 
     pub fn picture_parameter_set(&self) -> Result<&[u8]> {
         if let Some(ref avc1) = self.trak.mdia.minf.stbl.stsd.avc1 {
-            match avc1.avcc.picture_parameter_sets.get(0) {
+            match avc1.avcc.picture_parameter_sets.first() {
                 Some(nal) => Ok(nal.bytes.as_ref()),
                 None => Err(Error::EntryInStblNotFound(
                     self.track_id(),
@@ -386,7 +386,7 @@ impl Mp4Track {
         None
     }
 
-    fn sample_size(&self, sample_id: u32) -> Result<u32> {
+    pub(crate) fn sample_size(&self, sample_id: u32) -> Result<u32> {
         if !self.trafs.is_empty() {
             if let Some((traf_idx, sample_idx)) = self.find_traf_idx_and_sample_idx(sample_id) {
                 if let Some(size) = self.trafs[traf_idx]
@@ -499,7 +499,7 @@ impl Mp4Track {
         }
     }
 
-    fn sample_time(&self, sample_id: u32) -> Result<(u64, u32)> {
+    pub(crate) fn sample_time(&self, sample_id: u32) -> Result<(u64, u32)> {
         if !self.trafs.is_empty() {
             if let Some((traf_idx, sample_idx)) = self.find_traf_idx_and_sample_idx(sample_id) {
                 let traf = &self.trafs[traf_idx];
@@ -567,7 +567,7 @@ impl Mp4Track {
         }
     }
 
-    fn sample_rendering_offset(&self, sample_id: u32) -> i32 {
+    pub(crate) fn sample_rendering_offset(&self, sample_id: u32) -> i32 {
         if !self.trafs.is_empty() {
             if let Some((traf_idx, sample_idx)) = self.find_traf_idx_and_sample_idx(sample_id) {
                 if let Some(cts) = self.trafs[traf_idx]
@@ -587,7 +587,7 @@ impl Mp4Track {
         0
     }
 
-    fn is_sync_sample(&self, sample_id: u32) -> bool {
+    pub(crate) fn is_sync_sample(&self, sample_id: u32) -> bool {
         if !self.trafs.is_empty() {
             if let Some((_, sample_idx)) = self.find_traf_idx_and_sample_idx(sample_id) {
                 return sample_idx == 0;
@@ -613,6 +613,7 @@ impl Mp4Track {
             Err(Error::EntryInStblNotFound(_, _, _)) => return Ok(None),
             Err(err) => return Err(err),
         };
+
         let sample_size = match self.sample_size(sample_id) {
             Ok(size) => size,
             Err(Error::EntryInStblNotFound(_, _, _)) => return Ok(None),

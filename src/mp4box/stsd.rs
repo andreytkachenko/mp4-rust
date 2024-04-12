@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::vp09::Vp09Box;
 use crate::mp4box::*;
@@ -45,14 +45,13 @@ impl StsdBox {
         } else if let Some(ref tx3g) = self.tx3g {
             size += tx3g.box_size();
         }
+
         size
     }
 }
 
 impl Mp4Box for StsdBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::StsdBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -68,13 +67,11 @@ impl Mp4Box for StsdBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for StsdBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for StsdBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
-        let (version, flags) = read_box_header_ext(reader)?;
-
-        reader.read_u32::<BigEndian>()?; // XXX entry_count
+        reader.get_u32(); // XXX entry_count
 
         let mut avc1 = None;
         let mut hev1 = None;
@@ -82,35 +79,31 @@ impl<R: Read + Seek> ReadBox<&mut R> for StsdBox {
         let mut mp4a = None;
         let mut tx3g = None;
 
-        // Get box header.
-        let header = BoxHeader::read(reader)?;
-        let BoxHeader { name, size: s } = header;
-        if s > size {
-            return Err(Error::InvalidData(
-                "stsd box contains a box with a larger size than it",
-            ));
-        }
+        while let Some(mut bx) = reader.get_box()? {
+            match bx.kind {
+                BoxType::Avc1Box => {
+                    avc1 = Some(bx.read()?);
+                }
 
-        match name {
-            BoxType::Avc1Box => {
-                avc1 = Some(Avc1Box::read_box(reader, s)?);
-            }
-            BoxType::Hev1Box => {
-                hev1 = Some(Hev1Box::read_box(reader, s)?);
-            }
-            BoxType::Vp09Box => {
-                vp09 = Some(Vp09Box::read_box(reader, s)?);
-            }
-            BoxType::Mp4aBox => {
-                mp4a = Some(Mp4aBox::read_box(reader, s)?);
-            }
-            BoxType::Tx3gBox => {
-                tx3g = Some(Tx3gBox::read_box(reader, s)?);
-            }
-            _ => {}
-        }
+                BoxType::Hev1Box => {
+                    hev1 = Some(bx.read()?);
+                }
 
-        skip_bytes_to(reader, start + size)?;
+                BoxType::Vp09Box => {
+                    vp09 = Some(bx.read()?);
+                }
+
+                BoxType::Mp4aBox => {
+                    mp4a = Some(bx.read()?);
+                }
+
+                BoxType::Tx3gBox => {
+                    tx3g = Some(bx.read()?);
+                }
+
+                _ => {}
+            }
+        }
 
         Ok(StsdBox {
             version,
@@ -122,12 +115,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for StsdBox {
             tx3g,
         })
     }
+
+    fn size_hint() -> usize {
+        8
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for StsdBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 

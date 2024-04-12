@@ -1,7 +1,6 @@
-use std::ffi::CStr;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
 
 use crate::mp4box::*;
@@ -39,9 +38,7 @@ impl EmsgBox {
 }
 
 impl Mp4Box for EmsgBox {
-    fn box_type(&self) -> BoxType {
-        BoxType::EmsgBox
-    }
+    const TYPE: BoxType = BoxType::EmsgBox;
 
     fn box_size(&self) -> u64 {
         Self::size_without_message(self.version, &self.scheme_id_uri, &self.value)
@@ -58,10 +55,9 @@ impl Mp4Box for EmsgBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for EmsgBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-        let (version, flags) = read_box_header_ext(reader)?;
+impl BlockReader for EmsgBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
         let (
             timescale,
@@ -73,37 +69,30 @@ impl<R: Read + Seek> ReadBox<&mut R> for EmsgBox {
             value,
         ) = match version {
             0 => {
-                let scheme_id_uri = read_null_terminated_utf8_string(reader)?;
-                let value = read_null_terminated_utf8_string(reader)?;
+                let scheme_id_uri = reader.get_null_terminated_string();
+                let value = reader.get_null_terminated_string();
+
                 (
-                    reader.read_u32::<BigEndian>()?,
+                    reader.get_u32(),
                     None,
-                    Some(reader.read_u32::<BigEndian>()?),
-                    reader.read_u32::<BigEndian>()?,
-                    reader.read_u32::<BigEndian>()?,
+                    Some(reader.get_u32()),
+                    reader.get_u32(),
+                    reader.get_u32(),
                     scheme_id_uri,
                     value,
                 )
             }
             1 => (
-                reader.read_u32::<BigEndian>()?,
-                Some(reader.read_u64::<BigEndian>()?),
+                reader.get_u32(),
+                Some(reader.get_u64()),
                 None,
-                reader.read_u32::<BigEndian>()?,
-                reader.read_u32::<BigEndian>()?,
-                read_null_terminated_utf8_string(reader)?,
-                read_null_terminated_utf8_string(reader)?,
+                reader.get_u32(),
+                reader.get_u32(),
+                reader.get_null_terminated_string(),
+                reader.get_null_terminated_string(),
             ),
             _ => return Err(Error::InvalidData("version must be 0 or 1")),
         };
-
-        let message_size = size - Self::size_without_message(version, &scheme_id_uri, &value);
-        let mut message_data = Vec::with_capacity(message_size as usize);
-        for _ in 0..message_size {
-            message_data.push(reader.read_u8()?);
-        }
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(EmsgBox {
             version,
@@ -115,15 +104,19 @@ impl<R: Read + Seek> ReadBox<&mut R> for EmsgBox {
             id,
             scheme_id_uri,
             value,
-            message_data,
+            message_data: reader.collect(reader.remaining())?,
         })
+    }
+
+    fn size_hint() -> usize {
+        22
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for EmsgBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
         match self.version {
@@ -154,22 +147,6 @@ impl<W: Write> WriteBox<&mut W> for EmsgBox {
     }
 }
 
-fn read_null_terminated_utf8_string<R: Read + Seek>(reader: &mut R) -> Result<String> {
-    let mut bytes = Vec::new();
-    loop {
-        let byte = reader.read_u8()?;
-        bytes.push(byte);
-        if byte == 0 {
-            break;
-        }
-    }
-    if let Ok(str) = unsafe { CStr::from_bytes_with_nul_unchecked(&bytes) }.to_str() {
-        Ok(str.to_string())
-    } else {
-        Err(Error::InvalidData("invalid utf8"))
-    }
-}
-
 fn write_null_terminated_str<W: Write>(writer: &mut W, string: &str) -> Result<()> {
     for byte in string.bytes() {
         writer.write_u8(byte)?;
@@ -180,7 +157,6 @@ fn write_null_terminated_str<W: Write>(writer: &mut W, string: &str) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
 
     use crate::mp4box::BoxHeader;
 
@@ -204,12 +180,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::EmsgBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::EmsgBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = EmsgBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = EmsgBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 
@@ -231,12 +207,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::EmsgBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::EmsgBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = EmsgBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = EmsgBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

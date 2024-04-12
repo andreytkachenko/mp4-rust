@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 
@@ -32,9 +32,7 @@ impl MfhdBox {
 }
 
 impl Mp4Box for MfhdBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::MfhdBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -50,27 +48,26 @@ impl Mp4Box for MfhdBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for MfhdBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
-        let (version, flags) = read_box_header_ext(reader)?;
-        let sequence_number = reader.read_u32::<BigEndian>()?;
-
-        skip_bytes_to(reader, start + size)?;
+impl BlockReader for MfhdBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
         Ok(MfhdBox {
             version,
             flags,
-            sequence_number,
+            sequence_number: reader.get_u32(),
         })
+    }
+
+    fn size_hint() -> usize {
+        8
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for MfhdBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
         writer.write_u32::<BigEndian>(self.sequence_number)?;
@@ -83,7 +80,6 @@ impl<W: Write> WriteBox<&mut W> for MfhdBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_mfhd() {
@@ -96,12 +92,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::MfhdBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::MfhdBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = MfhdBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = MfhdBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

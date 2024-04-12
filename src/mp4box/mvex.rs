@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 use crate::mp4box::{mehd::MehdBox, trex::TrexBox};
@@ -21,9 +21,7 @@ impl MvexBox {
 }
 
 impl Mp4Box for MvexBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::MvexBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -39,62 +37,34 @@ impl Mp4Box for MvexBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for MvexBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
-        let mut mehd = None;
-        let mut trex = None;
-
-        let mut current = reader.stream_position()?;
-        let end = start + size;
-        while current < end {
-            // Get box header.
-            let header = BoxHeader::read(reader)?;
-            let BoxHeader { name, size: s } = header;
-            if s > size {
-                return Err(Error::InvalidData(
-                    "mvex box contains a box with a larger size than it",
-                ));
-            }
-
-            match name {
-                BoxType::MehdBox => {
-                    mehd = Some(MehdBox::read_box(reader, s)?);
-                }
-                BoxType::TrexBox => {
-                    trex = Some(TrexBox::read_box(reader, s)?);
-                }
-                _ => {
-                    // XXX warn!()
-                    skip_box(reader, s)?;
-                }
-            }
-
-            current = reader.stream_position()?;
-        }
+impl BlockReader for MvexBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (mehd, trex) = reader.try_find_box2::<MehdBox, TrexBox>()?;
 
         if trex.is_none() {
             return Err(Error::BoxNotFound(BoxType::TrexBox));
         }
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(MvexBox {
             mehd,
             trex: trex.unwrap(),
         })
     }
+
+    fn size_hint() -> usize {
+        TrexBox::size_hint()
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for MvexBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         if let Some(mehd) = &self.mehd {
             mehd.write_box(writer)?;
         }
+
         self.trex.write_box(writer)?;
 
         Ok(size)

@@ -1,6 +1,5 @@
 use mp4::{
-    AudioObjectType, AvcProfile, ChannelConfig, MediaType, Metadata, Mp4Reader, SampleFreqIndex,
-    TrackType,
+    AudioObjectType, AvcProfile, ChannelConfig, MediaType, Mp4Reader, SampleFreqIndex, TrackType,
 };
 use std::fs::{self, File};
 use std::io::BufReader;

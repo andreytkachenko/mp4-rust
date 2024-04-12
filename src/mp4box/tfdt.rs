@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 
@@ -28,9 +28,7 @@ impl TfdtBox {
 }
 
 impl Mp4Box for TfdtBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::TfdtBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -46,21 +44,17 @@ impl Mp4Box for TfdtBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for TfdtBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
-        let (version, flags) = read_box_header_ext(reader)?;
+impl BlockReader for TfdtBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
         let base_media_decode_time = if version == 1 {
-            reader.read_u64::<BigEndian>()?
+            reader.get_u64()
         } else if version == 0 {
-            reader.read_u32::<BigEndian>()? as u64
+            reader.get_u32() as u64
         } else {
             return Err(Error::InvalidData("version must be 0 or 1"));
         };
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(TfdtBox {
             version,
@@ -68,12 +62,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for TfdtBox {
             base_media_decode_time,
         })
     }
+
+    fn size_hint() -> usize {
+        8
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for TfdtBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -93,7 +91,6 @@ impl<W: Write> WriteBox<&mut W> for TfdtBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_tfdt32() {
@@ -106,12 +103,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::TfdtBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::TfdtBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = TfdtBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = TfdtBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 
@@ -126,12 +123,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::TfdtBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::TfdtBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = TfdtBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = TfdtBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

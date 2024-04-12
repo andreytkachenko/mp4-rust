@@ -1,5 +1,3 @@
-use std::io::{Read, Seek};
-
 use serde::Serialize;
 
 use crate::mp4box::meta::MetaBox;
@@ -26,9 +24,7 @@ impl UdtaBox {
 }
 
 impl Mp4Box for UdtaBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::UdtaBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -43,47 +39,22 @@ impl Mp4Box for UdtaBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for UdtaBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for UdtaBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        Ok(UdtaBox {
+            meta: reader.try_find_box()?,
+        })
+    }
 
-        let mut meta = None;
-
-        let mut current = reader.stream_position()?;
-        let end = start + size;
-        while current < end {
-            // Get box header.
-            let header = BoxHeader::read(reader)?;
-            let BoxHeader { name, size: s } = header;
-            if s > size {
-                return Err(Error::InvalidData(
-                    "udta box contains a box with a larger size than it",
-                ));
-            }
-
-            match name {
-                BoxType::MetaBox => {
-                    meta = Some(MetaBox::read_box(reader, s)?);
-                }
-                _ => {
-                    // XXX warn!()
-                    skip_box(reader, s)?;
-                }
-            }
-
-            current = reader.stream_position()?;
-        }
-
-        skip_bytes_to(reader, start + size)?;
-
-        Ok(UdtaBox { meta })
+    fn size_hint() -> usize {
+        0
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for UdtaBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         if let Some(meta) = &self.meta {
             meta.write_box(writer)?;
@@ -96,7 +67,6 @@ impl<W: Write> WriteBox<&mut W> for UdtaBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_udta_empty() {
@@ -106,12 +76,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::UdtaBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::UdtaBox);
         assert_eq!(header.size, src_box.box_size());
 
-        let dst_box = UdtaBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = UdtaBox::read_block(&mut reader).unwrap();
         assert_eq!(dst_box, src_box);
     }
 
@@ -125,12 +95,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::UdtaBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::UdtaBox);
         assert_eq!(header.size, src_box.box_size());
 
-        let dst_box = UdtaBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = UdtaBox::read_block(&mut reader).unwrap();
         assert_eq!(dst_box, src_box);
     }
 }

@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 
@@ -26,9 +26,7 @@ impl TrexBox {
 }
 
 impl Mp4Box for TrexBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::TrexBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -47,19 +45,15 @@ impl Mp4Box for TrexBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for TrexBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for TrexBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
-        let (version, flags) = read_box_header_ext(reader)?;
-
-        let track_id = reader.read_u32::<BigEndian>()?;
-        let default_sample_description_index = reader.read_u32::<BigEndian>()?;
-        let default_sample_duration = reader.read_u32::<BigEndian>()?;
-        let default_sample_size = reader.read_u32::<BigEndian>()?;
-        let default_sample_flags = reader.read_u32::<BigEndian>()?;
-
-        skip_bytes_to(reader, start + size)?;
+        let track_id = reader.get_u32();
+        let default_sample_description_index = reader.get_u32();
+        let default_sample_duration = reader.get_u32();
+        let default_sample_size = reader.get_u32();
+        let default_sample_flags = reader.get_u32();
 
         Ok(TrexBox {
             version,
@@ -71,12 +65,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for TrexBox {
             default_sample_flags,
         })
     }
+
+    fn size_hint() -> usize {
+        24
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for TrexBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -94,7 +92,6 @@ impl<W: Write> WriteBox<&mut W> for TrexBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_trex() {
@@ -111,12 +108,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::TrexBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::TrexBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = TrexBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = TrexBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 
@@ -19,9 +19,7 @@ impl DinfBox {
 }
 
 impl Mp4Box for DinfBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::DinfBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -37,53 +35,22 @@ impl Mp4Box for DinfBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for DinfBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
-        let mut dref = None;
-
-        let mut current = reader.stream_position()?;
-        let end = start + size;
-        while current < end {
-            // Get box header.
-            let header = BoxHeader::read(reader)?;
-            let BoxHeader { name, size: s } = header;
-            if s > size {
-                return Err(Error::InvalidData(
-                    "dinf box contains a box with a larger size than it",
-                ));
-            }
-
-            match name {
-                BoxType::DrefBox => {
-                    dref = Some(DrefBox::read_box(reader, s)?);
-                }
-                _ => {
-                    // XXX warn!()
-                    skip_box(reader, s)?;
-                }
-            }
-
-            current = reader.stream_position()?;
-        }
-
-        if dref.is_none() {
-            return Err(Error::BoxNotFound(BoxType::DrefBox));
-        }
-
-        skip_bytes_to(reader, start + size)?;
-
+impl BlockReader for DinfBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
         Ok(DinfBox {
-            dref: dref.unwrap(),
+            dref: reader.find_box::<DrefBox>()?,
         })
+    }
+
+    fn size_hint() -> usize {
+        DrefBox::size_hint()
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for DinfBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
         self.dref.write_box(writer)?;
         Ok(size)
     }
@@ -109,10 +76,6 @@ impl Default for DrefBox {
 }
 
 impl DrefBox {
-    pub fn get_type(&self) -> BoxType {
-        BoxType::DrefBox
-    }
-
     pub fn get_size(&self) -> u64 {
         let mut size = HEADER_SIZE + HEADER_EXT_SIZE + 4;
         if let Some(ref url) = self.url {
@@ -123,9 +86,7 @@ impl DrefBox {
 }
 
 impl Mp4Box for DrefBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::DrefBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -141,45 +102,15 @@ impl Mp4Box for DrefBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for DrefBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
-        let mut current = reader.stream_position()?;
-
-        let (version, flags) = read_box_header_ext(reader)?;
-        let end = start + size;
-
+impl BlockReader for DrefBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
         let mut url = None;
+        let entry_count = reader.get_u32();
 
-        let entry_count = reader.read_u32::<BigEndian>()?;
         for _i in 0..entry_count {
-            if current >= end {
-                break;
-            }
-
-            // Get box header.
-            let header = BoxHeader::read(reader)?;
-            let BoxHeader { name, size: s } = header;
-            if s > size {
-                return Err(Error::InvalidData(
-                    "dinf box contains a box with a larger size than it",
-                ));
-            }
-
-            match name {
-                BoxType::UrlBox => {
-                    url = Some(UrlBox::read_box(reader, s)?);
-                }
-                _ => {
-                    skip_box(reader, s)?;
-                }
-            }
-
-            current = reader.stream_position()?;
+            url = reader.try_find_box()?;
         }
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(DrefBox {
             version,
@@ -187,12 +118,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for DrefBox {
             url,
         })
     }
+
+    fn size_hint() -> usize {
+        8
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for DrefBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -224,10 +159,6 @@ impl Default for UrlBox {
 }
 
 impl UrlBox {
-    pub fn get_type(&self) -> BoxType {
-        BoxType::UrlBox
-    }
-
     pub fn get_size(&self) -> u64 {
         let mut size = HEADER_SIZE + HEADER_EXT_SIZE;
 
@@ -240,9 +171,7 @@ impl UrlBox {
 }
 
 impl Mp4Box for UrlBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::UrlBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -258,37 +187,26 @@ impl Mp4Box for UrlBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for UrlBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
-
-        let (version, flags) = read_box_header_ext(reader)?;
-
-        let buf_size = size
-            .checked_sub(HEADER_SIZE + HEADER_EXT_SIZE)
-            .ok_or(Error::InvalidData("url size too small"))?;
-
-        let mut buf = vec![0u8; buf_size as usize];
-        reader.read_exact(&mut buf)?;
-        if let Some(end) = buf.iter().position(|&b| b == b'\0') {
-            buf.truncate(end);
-        }
-        let location = String::from_utf8(buf).unwrap_or_default();
-
-        skip_bytes_to(reader, start + size)?;
+impl BlockReader for UrlBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
         Ok(UrlBox {
             version,
             flags,
-            location,
+            location: reader.get_null_terminated_string(),
         })
+    }
+
+    fn size_hint() -> usize {
+        4
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for UrlBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 

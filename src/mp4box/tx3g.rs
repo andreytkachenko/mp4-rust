@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 
@@ -53,9 +53,7 @@ impl Tx3gBox {
 }
 
 impl Mp4Box for Tx3gBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::Tx3gBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -74,45 +72,41 @@ impl Mp4Box for Tx3gBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for Tx3gBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for Tx3gBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        reader.get_u32(); // reserved
+        reader.get_u16(); // reserved
+        let data_reference_index = reader.get_u16();
 
-        reader.read_u32::<BigEndian>()?; // reserved
-        reader.read_u16::<BigEndian>()?; // reserved
-        let data_reference_index = reader.read_u16::<BigEndian>()?;
-
-        let display_flags = reader.read_u32::<BigEndian>()?;
-        let horizontal_justification = reader.read_i8()?;
-        let vertical_justification = reader.read_i8()?;
+        let display_flags = reader.get_u32();
+        let horizontal_justification = reader.get_i8();
+        let vertical_justification = reader.get_i8();
         let bg_color_rgba = RgbaColor {
-            red: reader.read_u8()?,
-            green: reader.read_u8()?,
-            blue: reader.read_u8()?,
-            alpha: reader.read_u8()?,
+            red: reader.get_u8(),
+            green: reader.get_u8(),
+            blue: reader.get_u8(),
+            alpha: reader.get_u8(),
         };
         let box_record: [i16; 4] = [
-            reader.read_i16::<BigEndian>()?,
-            reader.read_i16::<BigEndian>()?,
-            reader.read_i16::<BigEndian>()?,
-            reader.read_i16::<BigEndian>()?,
+            reader.get_i16(),
+            reader.get_i16(),
+            reader.get_i16(),
+            reader.get_i16(),
         ];
         let style_record: [u8; 12] = [
-            reader.read_u8()?,
-            reader.read_u8()?,
-            reader.read_u8()?,
-            reader.read_u8()?,
-            reader.read_u8()?,
-            reader.read_u8()?,
-            reader.read_u8()?,
-            reader.read_u8()?,
-            reader.read_u8()?,
-            reader.read_u8()?,
-            reader.read_u8()?,
-            reader.read_u8()?,
+            reader.get_u8(),
+            reader.get_u8(),
+            reader.get_u8(),
+            reader.get_u8(),
+            reader.get_u8(),
+            reader.get_u8(),
+            reader.get_u8(),
+            reader.get_u8(),
+            reader.get_u8(),
+            reader.get_u8(),
+            reader.get_u8(),
+            reader.get_u8(),
         ];
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(Tx3gBox {
             data_reference_index,
@@ -124,12 +118,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for Tx3gBox {
             style_record,
         })
     }
+
+    fn size_hint() -> usize {
+        34
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for Tx3gBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         writer.write_u32::<BigEndian>(0)?; // reserved
         writer.write_u16::<BigEndian>(0)?; // reserved
@@ -156,7 +154,6 @@ impl<W: Write> WriteBox<&mut W> for Tx3gBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_tx3g() {
@@ -178,12 +175,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::Tx3gBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::Tx3gBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = Tx3gBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = Tx3gBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

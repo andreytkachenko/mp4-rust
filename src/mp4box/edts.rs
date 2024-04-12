@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::elst::ElstBox;
 use crate::mp4box::*;
@@ -10,10 +10,6 @@ pub struct EdtsBox {
 }
 
 impl EdtsBox {
-    pub(crate) fn new() -> EdtsBox {
-        Default::default()
-    }
-
     pub fn get_type(&self) -> BoxType {
         BoxType::EdtsBox
     }
@@ -28,9 +24,7 @@ impl EdtsBox {
 }
 
 impl Mp4Box for EdtsBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::EdtsBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -46,35 +40,22 @@ impl Mp4Box for EdtsBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for EdtsBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for EdtsBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        Ok(EdtsBox {
+            elst: reader.try_find_box::<ElstBox>()?,
+        })
+    }
 
-        let mut edts = EdtsBox::new();
-
-        let header = BoxHeader::read(reader)?;
-        let BoxHeader { name, size: s } = header;
-        if s > size {
-            return Err(Error::InvalidData(
-                "edts box contains a box with a larger size than it",
-            ));
-        }
-
-        if let BoxType::ElstBox = name {
-            let elst = ElstBox::read_box(reader, s)?;
-            edts.elst = Some(elst);
-        }
-
-        skip_bytes_to(reader, start + size)?;
-
-        Ok(edts)
+    fn size_hint() -> usize {
+        0
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for EdtsBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         if let Some(ref elst) = self.elst {
             elst.write_box(writer)?;

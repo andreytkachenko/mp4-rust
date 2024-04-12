@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 use std::mem::size_of;
 
 use crate::mp4box::*;
@@ -25,9 +25,7 @@ impl Co64Box {
 }
 
 impl Mp4Box for Co64Box {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::Co64Box;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -43,33 +41,23 @@ impl Mp4Box for Co64Box {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for Co64Box {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for Co64Box {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
-        let (version, flags) = read_box_header_ext(reader)?;
-
-        let header_size = HEADER_SIZE + HEADER_EXT_SIZE;
-        let other_size = size_of::<u32>(); // entry_count
         let entry_size = size_of::<u64>(); // chunk_offset
-        let entry_count = reader.read_u32::<BigEndian>()?;
-        if u64::from(entry_count)
-            > size
-                .saturating_sub(header_size)
-                .saturating_sub(other_size as u64)
-                / entry_size as u64
-        {
+        let entry_count = reader.get_u32();
+        if entry_count as usize > reader.remaining() / entry_size {
             return Err(Error::InvalidData(
                 "co64 entry_count indicates more entries than could fit in the box",
             ));
         }
+
         let mut entries = Vec::with_capacity(entry_count as usize);
         for _i in 0..entry_count {
-            let chunk_offset = reader.read_u64::<BigEndian>()?;
+            let chunk_offset = reader.get_u64();
             entries.push(chunk_offset);
         }
-
-        skip_bytes_to(reader, start + size)?;
 
         Ok(Co64Box {
             version,
@@ -77,12 +65,16 @@ impl<R: Read + Seek> ReadBox<&mut R> for Co64Box {
             entries,
         })
     }
+
+    fn size_hint() -> usize {
+        8
+    }
 }
 
 impl<W: Write> WriteBox<&mut W> for Co64Box {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -99,7 +91,6 @@ impl<W: Write> WriteBox<&mut W> for Co64Box {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_co64() {
@@ -112,12 +103,11 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::Co64Box);
+        let header = BoxHeader::read_sync(&mut buf.as_slice()).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::Co64Box);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = Co64Box::read_box(&mut reader, header.size).unwrap();
+        let dst_box = Co64Box::read_block(&mut buf.as_slice()).unwrap();
         assert_eq!(src_box, dst_box);
     }
 }

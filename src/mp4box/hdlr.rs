@@ -1,6 +1,6 @@
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use serde::Serialize;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 
 use crate::mp4box::*;
 
@@ -23,9 +23,7 @@ impl HdlrBox {
 }
 
 impl Mp4Box for HdlrBox {
-    fn box_type(&self) -> BoxType {
-        self.get_type()
-    }
+    const TYPE: BoxType = BoxType::HdlrBox;
 
     fn box_size(&self) -> u64 {
         self.get_size()
@@ -41,43 +39,33 @@ impl Mp4Box for HdlrBox {
     }
 }
 
-impl<R: Read + Seek> ReadBox<&mut R> for HdlrBox {
-    fn read_box(reader: &mut R, size: u64) -> Result<Self> {
-        let start = box_start(reader)?;
+impl BlockReader for HdlrBox {
+    fn read_block<'a>(reader: &mut impl Reader<'a>) -> Result<Self> {
+        let (version, flags) = read_box_header_ext(reader);
 
-        let (version, flags) = read_box_header_ext(reader)?;
+        reader.get_u32(); // pre-defined
 
-        reader.read_u32::<BigEndian>()?; // pre-defined
-        let handler = reader.read_u32::<BigEndian>()?;
+        let handler = reader.get_u32();
 
-        skip_bytes(reader, 12)?; // reserved
-
-        let buf_size = size
-            .checked_sub(HEADER_SIZE + HEADER_EXT_SIZE + 20)
-            .ok_or(Error::InvalidData("hdlr size too small"))?;
-
-        let mut buf = vec![0u8; buf_size as usize];
-        reader.read_exact(&mut buf)?;
-        if let Some(end) = buf.iter().position(|&b| b == b'\0') {
-            buf.truncate(end);
-        }
-        let handler_string = String::from_utf8(buf).unwrap_or_default();
-
-        skip_bytes_to(reader, start + size)?;
+        reader.skip(12);
 
         Ok(HdlrBox {
             version,
             flags,
             handler_type: From::from(handler),
-            name: handler_string,
+            name: reader.get_null_terminated_string(),
         })
+    }
+
+    fn size_hint() -> usize {
+        24
     }
 }
 
 impl<W: Write> WriteBox<&mut W> for HdlrBox {
     fn write_box(&self, writer: &mut W) -> Result<u64> {
         let size = self.box_size();
-        BoxHeader::new(self.box_type(), size).write(writer)?;
+        BoxHeader::new(Self::TYPE, size).write(writer)?;
 
         write_box_header_ext(writer, self.version, self.flags)?;
 
@@ -100,7 +88,6 @@ impl<W: Write> WriteBox<&mut W> for HdlrBox {
 mod tests {
     use super::*;
     use crate::mp4box::BoxHeader;
-    use std::io::Cursor;
 
     #[test]
     fn test_hdlr() {
@@ -114,12 +101,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::HdlrBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::HdlrBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = HdlrBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = HdlrBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 
@@ -135,12 +122,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::HdlrBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::HdlrBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = HdlrBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = HdlrBox::read_block(&mut reader).unwrap();
         assert_eq!(src_box, dst_box);
     }
 
@@ -162,12 +149,12 @@ mod tests {
         src_box.write_box(&mut buf).unwrap();
         assert_eq!(buf.len(), src_box.box_size() as usize);
 
-        let mut reader = Cursor::new(&buf);
-        let header = BoxHeader::read(&mut reader).unwrap();
-        assert_eq!(header.name, BoxType::HdlrBox);
+        let mut reader = buf.as_slice();
+        let header = BoxHeader::read_sync(&mut reader).unwrap().unwrap();
+        assert_eq!(header.kind, BoxType::HdlrBox);
         assert_eq!(src_box.box_size(), header.size);
 
-        let dst_box = HdlrBox::read_box(&mut reader, header.size).unwrap();
+        let dst_box = HdlrBox::read_block(&mut reader).unwrap();
         assert_eq!(real_src_box, dst_box);
     }
 }
